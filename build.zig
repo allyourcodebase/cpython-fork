@@ -67,8 +67,8 @@ fn buildLibPython(
     libpython.addIncludePath(b.path("Include/internal"));
     libpython.addIncludePath(b.path("."));
     libpython.addIncludePath(b.path("Include"));
-
     libpython.addConfigHeader(config_header);
+
     libpython.addCSourceFiles(.{
         .files = core_files,
         .flags = &.{
@@ -128,7 +128,7 @@ fn getConfigHeader(b: *std.Build, t: std.Target) *Step.ConfigHeader {
             .include_path = "pyconfig.h",
         },
         .{
-            .ALIGNOF_LONG = 8,
+            .ALIGNOF_LONG = t.c_type_alignment(.long),
             .ALIGNOF_SIZE_T = 8,
             .DOUBLE_IS_LITTLE_ENDIAN_IEEE754 = 1,
             .ENABLE_IPV6 = 1,
@@ -498,13 +498,13 @@ fn getConfigHeader(b: *std.Build, t: std.Target) *Step.ConfigHeader {
             .PY_SSL_DEFAULT_CIPHERS = 1,
             .PY_SUPPORT_TIER = 2,
             .RETSIGTYPE = .void,
-            .SIZEOF_DOUBLE = 8,
-            .SIZEOF_FLOAT = 4,
+            .SIZEOF_DOUBLE = t.c_type_byte_size(.double),
+            .SIZEOF_FLOAT = t.c_type_byte_size(.float),
             .SIZEOF_FPOS_T = 16,
-            .SIZEOF_INT = 4,
-            .SIZEOF_LONG = 8,
-            .SIZEOF_LONG_DOUBLE = 16,
-            .SIZEOF_LONG_LONG = 8,
+            .SIZEOF_INT = t.c_type_byte_size(.int),
+            .SIZEOF_LONG = t.c_type_byte_size(.long),
+            .SIZEOF_LONG_DOUBLE = t.c_type_byte_size(.longdouble),
+            .SIZEOF_LONG_LONG = t.c_type_byte_size(.longlong),
             .SIZEOF_OFF_T = 8,
             .SIZEOF_PID_T = 4,
             .SIZEOF_PTHREAD_KEY_T = 4,
@@ -534,7 +534,7 @@ fn getConfigHeader(b: *std.Build, t: std.Target) *Step.ConfigHeader {
             ._XOPEN_SOURCE_EXTENDED = 1,
             .__BSD_VISIBLE = 1,
             ._ALL_SOURCE = 1,
-            ._GNU_SOURCE = 1,
+            ._GNU_SOURCE = 1, // TODO: disable based on target?
             ._POSIX_PTHREAD_SEMANTICS = 1,
             ._TANDEM_SOURCE = 1,
             .__EXTENSIONS__ = 1,
