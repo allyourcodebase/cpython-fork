@@ -25,11 +25,22 @@ pub fn build(b: *std.Build) !void {
 
     b.installArtifact(libpython);
 
-    const cpython = try buildCpython(b, target, optimize, libpython);
+    const cpython = try buildCpython(b, target, optimize, libpython, config_header);
     cpython.linkLibrary(libz_dep.artifact("z"));
     cpython.linkLibrary(openssl_dep.artifact("openssl"));
     cpython.rdynamic = true;
     b.installArtifact(cpython);
+}
+
+fn addIncludes(
+    b: *std.Build,
+    step: *Step.Compile,
+    config_header: *std.Build.Step.ConfigHeader,
+) void {
+    step.addIncludePath(b.path("Include/internal"));
+    step.addIncludePath(b.path("."));
+    step.addIncludePath(b.path("Include"));
+    step.addConfigHeader(config_header);
 }
 
 fn buildCpython(
@@ -37,6 +48,7 @@ fn buildCpython(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     libpython: *std.Build.Step.Compile,
+    config_header: *std.Build.Step.ConfigHeader,
 ) !*std.Build.Step.Compile {
     const cpython = b.addExecutable(.{
         .name = "cpython",
@@ -44,7 +56,18 @@ fn buildCpython(
         .optimize = optimize,
     });
     cpython.linkLibrary(libpython);
-    cpython.addCSourceFile(.{ .file = b.path("Programs/python.c") });
+
+    addIncludes(b, cpython, config_header);
+
+    cpython.addCSourceFile(.{
+        .file = b.path("Programs/python.c"),
+        .flags = &.{
+            "-fwrapv",
+            "-std=c11",
+            "-fvisibility=hidden",
+            "-DPy_BUILD_CORE",
+        },
+    });
 
     return cpython;
 }
@@ -64,10 +87,7 @@ fn buildLibPython(
         .optimize = optimize,
     });
     libpython.linkLibC();
-    libpython.addIncludePath(b.path("Include/internal"));
-    libpython.addIncludePath(b.path("."));
-    libpython.addIncludePath(b.path("Include"));
-    libpython.addConfigHeader(config_header);
+    addIncludes(b, libpython, config_header);
 
     libpython.addCSourceFiles(.{
         .files = core_files,
