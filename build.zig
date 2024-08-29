@@ -82,7 +82,7 @@ fn buildLibPython(
     const t = target.result;
 
     const libpython = b.addStaticLibrary(.{
-        .name = "lib-python",
+        .name = "python",
         .target = target,
         .optimize = optimize,
     });
