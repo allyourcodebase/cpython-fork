@@ -27,6 +27,7 @@
         "README.md",
         "build.zig",
         "build.zig.zon",
+        "src",
         "pyconfig.h.in",
     },
 }
