@@ -32,8 +32,11 @@ pub extern fn PyErr_Fetch(?*anyopaque, ?*anyopaque, ?*anyopaque) void;
 pub extern fn PyErr_NormalizeException(?*anyopaque, ?*anyopaque, ?*anyopaque) void;
 
 pub extern fn PyConfig_InitPythonConfig(*PyConfig) void;
+pub extern fn PyConfig_InitIsolatedConfig(*PyConfig) void;
 pub extern fn PyConfig_Clear(*PyConfig) void;
 pub extern fn PyConfig_Read(*PyConfig) PyStatus;
+
+/// https://docs.python.org/3/c-api/init_config.html#c.Py_InitializeFromConfig
 pub extern fn Py_InitializeFromConfig(*PyConfig) PyStatus;
 
 pub extern fn PyWideStringList_Append(*PyWideStringList, [*:0]const u32) PyStatus;
