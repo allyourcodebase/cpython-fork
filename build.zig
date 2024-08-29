@@ -25,6 +25,13 @@ pub fn build(b: *std.Build) !void {
 
     b.installArtifact(libpython);
 
+    const bindings = b.addModule("python", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bindings.linkLibrary(libpython);
+
     const cpython = try buildCpython(b, target, optimize, libpython, config_header);
     cpython.linkLibrary(libz_dep.artifact("z"));
     cpython.linkLibrary(openssl_dep.artifact("openssl"));
