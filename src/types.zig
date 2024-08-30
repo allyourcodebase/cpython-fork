@@ -96,9 +96,9 @@ pub const PyStatus = extern struct {
         _PyStatus_TYPE_ERROR = 1,
         _PyStatus_TYPE_EXIT = 2,
     },
-    exitcode: c_int,
-    err_msg: [*:0]const u8,
     func: [*:0]const u8,
+    err_msg: [*:0]const u8,
+    exitcode: c_int,
 };
 
 pub const wchar = if (builtin.os.tag == .windows) u16 else u32;

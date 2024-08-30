@@ -12,6 +12,17 @@ pub fn utf8ToUtf32Z(
     return buffer.toOwnedSliceSentinel(0);
 }
 
+fn init_from_config(config: *py.types.PyConfig) !void {
+    const status = py.externs.Py_InitializeFromConfig(config);
+
+    // std.debug.print("END STATUS: {}\n", .{&status});
+
+    if (py.externs.PyStatus_Exception(status)) {
+        return error.Expection;
+        // py.externs.Py_ExitStatusException(status);
+    }
+}
+
 // https://github.com/Rexicon226/osmium/blob/e83ac667e006cf3a233c1868f76e57b155ba1739/src/frontend/Python.zig#L72
 pub fn Initialize(
     allocator: std.mem.Allocator,
@@ -83,16 +94,19 @@ pub fn Initialize(
     }
 
     std.debug.print("config: {}\n", .{config});
-    status = py.externs.Py_InitializeFromConfig(&config);
+    try init_from_config(&config);
+    // status = py.externs.Py_InitializeFromConfig(&config);
 
-    std.debug.print("END STATUS: {}\n", .{status});
+    // // std.debug.print("END STATUS: {}\n", .{&status});
 
-    if (py.externs.PyStatus_Exception(status)) {
-        py.externs.Py_ExitStatusException(status);
-    }
-    // // needs to be a pointer discard because the stack protector gets overrun?
-    _ = &status;
+    // if (py.externs.PyStatus_Exception(status)) {
+    //     py.externs.Py_ExitStatusException(status);
+    // }
+    // needs to be a pointer discard because the stack protector gets overrun?
+    // _ = &status;
     std.debug.print("END\n", .{});
+
+    py.externs.PyConfig_Clear(&config);
 }
 
 pub fn main() !void {
