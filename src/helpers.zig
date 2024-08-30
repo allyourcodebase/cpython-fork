@@ -1,32 +1,56 @@
 const externs = @import("externs.zig");
+const types = @import("types.zig");
 const constants = @import("constants.zig");
 
-pub fn Sys_SetPath(path: [:0]const u16) void {
-    externs.PySys_SetPath(path.ptr);
+const std = @import("std");
+
+pub fn utf8ToUtf32Z(
+    in: []const u8,
+    allocator: std.mem.Allocator,
+) ![:0]const u32 {
+    var buffer = std.ArrayList(u32).init(allocator);
+    for (in) |char| {
+        try buffer.append(char);
+    }
+    return buffer.toOwnedSliceSentinel(0);
 }
 
-pub fn SetProgramName(name: [:0]const u8) void {
-    externs.Py_SetProgramName(name.ptr);
-}
+pub fn Initialize(
+    allocator: std.mem.Allocator,
+) !void {
+    var config: types.PyConfig = undefined;
+    externs.PyConfig_InitIsolatedConfig(&config);
+    defer externs.PyConfig_Clear(&config);
 
-pub fn CompileString(source: [:0]const u8, filename: [:0]const u8) ?*anyopaque {
-    return externs.Py_CompileString(source.ptr, filename.ptr, constants.Py_file_input);
-}
+    var status = externs.PyConfig_SetBytesString(
+        &config,
+        &config.program_name,
+        "./test",
+    );
 
-pub fn Marshal_WriteObjectToString(code: ?*anyopaque) ?*anyopaque {
-    return externs.PyMarshal_WriteObjectToString(code, constants.Py_MARSHAL_VERSION);
-}
+    if (externs.PyStatus_Exception(status)) {
+        externs.Py_ExitStatusException(status);
+    }
 
-pub fn Bytes_Size(code: ?*anyopaque) usize {
-    return externs.PyBytes_Size(code);
-}
+    const utf32_path = try utf8ToUtf32Z(
+        constants.LIB_PATH,
+        allocator,
+    );
 
-pub fn Bytes_AsString(code: ?*anyopaque) ?[*:0]u8 {
-    return externs.PyBytes_AsString(code);
-}
+    // need to set the search path to the python "Lib" folder
+    // https://docs.python.org/3/c-api/init_config.html#python-path-configuration
+    config.module_search_paths_set = 1;
+    status = externs.PyWideStringList_Append(
+        &config.module_search_paths,
+        utf32_path.ptr,
+    );
 
-pub fn PrintError() void {
-    externs.PyErr_Print();
+    if (externs.PyStatus_Exception(status)) {
+        externs.Py_ExitStatusException(status);
+    }
 
-    // TODO: fetch and normalize here
+    status = externs.Py_InitializeFromConfig(&config);
+    if (externs.PyStatus_Exception(status)) {
+        externs.Py_ExitStatusException(status);
+    }
 }
