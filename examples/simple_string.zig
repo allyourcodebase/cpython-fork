@@ -47,6 +47,8 @@ pub fn Initialize(
         allocator,
     );
 
+    // need to set the search path to the python "Lib" folder
+    // https://docs.python.org/3/c-api/init_config.html#python-path-configuration
     config.module_search_paths_set = 1;
     status = py.externs.PyWideStringList_Append(
         &config.module_search_paths,
