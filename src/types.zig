@@ -91,6 +91,11 @@ pub const PyPreConfig = extern struct {
 };
 
 pub const PyStatus = extern struct {
+    _type: enum(c_int) {
+        _PyStatus_TYPE_OK = 0,
+        _PyStatus_TYPE_ERROR = 1,
+        _PyStatus_TYPE_EXIT = 2,
+    },
     exitcode: c_int,
     err_msg: [*:0]const u8,
     func: [*:0]const u8,

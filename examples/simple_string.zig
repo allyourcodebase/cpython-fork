@@ -38,17 +38,17 @@ pub fn Initialize(
         py.externs.Py_ExitStatusException(status);
     }
 
-    const lib_path = try allocator.dupeZ(u8, py.constants.LIB_PATH);
+    // const lib_path = try allocator.dupeZ(u8, py.constants.LIB_PATH);
 
-    status = py.externs.PyConfig_SetBytesString(
-        &config,
-        &config.home,
-        lib_path,
-    );
+    // status = py.externs.PyConfig_SetBytesString(
+    //     &config,
+    //     &config.home,
+    //     lib_path,
+    // );
 
-    if (py.externs.PyStatus_Exception(status)) {
-        py.externs.Py_ExitStatusException(status);
-    }
+    // if (py.externs.PyStatus_Exception(status)) {
+    //     py.externs.Py_ExitStatusException(status);
+    // }
 
     // status = py.externs.PyConfig_SetBytesString(
     //     &config,
@@ -73,10 +73,14 @@ pub fn Initialize(
     );
 
     config.module_search_paths_set = 1;
-    _ = py.externs.PyWideStringList_Append(
+    status = py.externs.PyWideStringList_Append(
         &config.module_search_paths,
         utf32_path.ptr,
     );
+
+    if (py.externs.PyStatus_Exception(status)) {
+        py.externs.Py_ExitStatusException(status);
+    }
 
     std.debug.print("config: {}\n", .{config});
     status = py.externs.Py_InitializeFromConfig(&config);
@@ -87,19 +91,22 @@ pub fn Initialize(
         py.externs.Py_ExitStatusException(status);
     }
     // // needs to be a pointer discard because the stack protector gets overrun?
-    // _ = &status;
+    _ = &status;
+    std.debug.print("END\n", .{});
 }
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     try Initialize(allocator);
-    defer std.debug.print("exit: {}\n", .{py.externs.Py_Finalize()});
+    defer py.externs.Py_Finalize();
 
-    // PyRun_SimpleString(
-    //     \\ from time import time,ctime\n
-    //     \\ print('Today is', ctime(time()))\n
-    // );
+    std.debug.print("AFTER INIT\n", .{});
 
-    py.externs.PyRun_SimpleString("print('hi')");
+    py.externs.PyRun_SimpleString(
+        \\from time import time,ctime
+        \\print('Today is', ctime(time()))
+    );
+
+    // py.externs.PyRun_SimpleString("print('hi')");
 }
