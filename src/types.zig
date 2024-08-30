@@ -6,12 +6,14 @@ pub const PyConfig = extern struct {
     dev_mode: c_int,
     install_signal_handlers: c_int,
     use_hash_seed: c_int,
-    hash_seed: u64,
+    hash_seed: c_ulong,
     faulthandler: c_int,
     tracemalloc: c_int,
     import_time: c_int,
+    code_debug_ranges: c_int,
     show_ref_count: c_int,
     dump_refs: c_int,
+    dump_refs_file: [*:0]wchar,
     malloc_stats: c_int,
     filesystem_encoding: [*:0]wchar,
     filesystem_errors: [*:0]wchar,
@@ -37,17 +39,20 @@ pub const PyConfig = extern struct {
     stdio_encoding: [*:0]wchar,
     stdio_errors: [*:0]wchar,
     check_hash_pycs_mode: [*:0]wchar,
+    use_frozen_modules: c_int,
+    safe_path: c_int,
 
     // --- Path configuration inputs ------------
     pathconfig_warnings: c_int,
     program_name: [*:0]wchar,
-    pythonpath_env: [*:0]wchar,
+    pythonpath_env: ?[*:0]wchar,
     home: [*:0]wchar,
     platlibdir: [*:0]wchar,
 
     // --- Path configuration outputs -----------
     module_search_paths_set: c_int,
     module_search_paths: PyWideStringList,
+    stdlib_dir: [*:0]wchar,
     executable: [*:0]wchar,
     base_executable: [*:0]wchar,
     prefix: [*:0]wchar,
@@ -64,6 +69,7 @@ pub const PyConfig = extern struct {
     _install_importlib: c_int,
     _init_main: c_int,
     _isolated_interpreter: c_int,
+    _is_python_build: c_int,
 };
 
 pub const PyWideStringList = extern struct {

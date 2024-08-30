@@ -7,6 +7,9 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
     const t = target.result;
 
+    const lib_options = b.addOptions();
+    lib_options.addOption([]const u8, "lib_path", b.fmt("{s}/python/Lib", .{b.install_path}));
+
     const libz_dep = b.dependency("libz", .{
         .target = target,
         .optimize = optimize,
@@ -19,26 +22,76 @@ pub fn build(b: *std.Build) !void {
 
     const config_header = getConfigHeader(b, t);
 
+    // zig build of python
     const libpython = try buildLibPython(b, target, optimize, config_header);
     libpython.linkLibrary(libz_dep.artifact("z"));
     libpython.linkLibrary(openssl_dep.artifact("openssl"));
 
+    // actual python code lib
+    const python_lib = b.addInstallDirectory(.{
+        .source_dir = b.path("Lib"),
+        .install_dir = .{ .custom = "python" },
+        .install_subdir = "Lib",
+    });
+    libpython.step.dependOn(&python_lib.step);
+
     b.installArtifact(libpython);
 
-    const bindings = b.addModule("python", .{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    bindings.linkLibrary(libpython);
+    const python_zig_module = getModule(b, target, optimize);
+    python_zig_module.linkLibrary(libpython);
+    python_zig_module.addOptions("build_options", lib_options);
 
     const cpython = try buildCpython(b, target, optimize, libpython, config_header);
     cpython.linkLibrary(libz_dep.artifact("z"));
     cpython.linkLibrary(openssl_dep.artifact("openssl"));
     cpython.rdynamic = true;
     b.installArtifact(cpython);
+
+    const examples_step = b.step("examples", "Builds all the examples");
+    for (examples) |ex| {
+        const exe = b.addExecutable(.{
+            .name = ex.name,
+            .root_source_file = b.path(ex.path),
+            .optimize = optimize,
+            .target = target,
+        });
+        exe.linkLibrary(libpython);
+        exe.root_module.addImport("python", python_zig_module);
+
+        addIncludes(b, exe, config_header);
+
+        const run_cmd = b.addRunArtifact(exe);
+        const run_step = b.step(ex.name, ex.desc);
+
+        run_step.dependOn(&run_cmd.step);
+        examples_step.dependOn(&exe.step);
+    }
 }
 
+fn getModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.Mode) *std.Build.Module {
+    if (b.modules.contains("python")) {
+        return b.modules.get("python").?;
+    }
+    return b.addModule("python", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+const Example = struct {
+    name: []const u8,
+    path: []const u8,
+    desc: []const u8,
+};
+
+const examples = [_]Example{
+    .{
+        .name = "simple_string",
+        .path = "examples/simple_string.zig",
+        .desc = "Basic eval of python program in a string",
+    },
+};
 fn addIncludes(
     b: *std.Build,
     step: *Step.Compile,

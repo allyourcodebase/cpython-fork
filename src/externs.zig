@@ -6,6 +6,8 @@ const PyStatus = types.PyStatus;
 const PyWideStringList = types.PyWideStringList;
 const wchar = types.wchar;
 
+const c_str = [*c]const u8;
+
 pub extern fn Py_PreInitialize(*const PyPreConfig) PyStatus;
 pub extern fn PyPreConfig_InitPythonConfig(*PyPreConfig) void;
 pub extern fn PyStatus_Exception(PyStatus) bool;
@@ -17,6 +19,8 @@ pub extern fn Py_Finalize() void;
 pub extern fn PySys_SetPath([*:0]const wchar) void;
 
 pub extern fn Py_DecRef(?*anyopaque) void;
+
+pub extern fn PyRun_SimpleString(c_str) void;
 
 pub extern fn Py_DecodeLocale([*:0]const u8, *usize) ?[*:0]u8;
 pub extern fn PyConfig_SetBytesString(*PyConfig, *const [*:0]wchar, [*:0]const u8) PyStatus;
