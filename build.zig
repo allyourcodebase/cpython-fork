@@ -22,7 +22,6 @@ pub fn build(b: *std.Build) !void {
 
     const config_header = getConfigHeader(b, t);
 
-    // zig build of python
     const libpython = try buildLibPython(b, target, optimize, config_header);
     libpython.linkLibrary(libz_dep.artifact("z"));
     libpython.linkLibrary(openssl_dep.artifact("openssl"));
@@ -92,6 +91,7 @@ const examples = [_]Example{
         .desc = "Basic eval of python program in a string",
     },
 };
+
 fn addIncludes(
     b: *std.Build,
     step: *Step.Compile,
@@ -103,6 +103,7 @@ fn addIncludes(
     step.addConfigHeader(config_header);
 }
 
+/// Build standalone python exectuable
 fn buildCpython(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -132,7 +133,7 @@ fn buildCpython(
     return cpython;
 }
 
-// https://github.com/Rexicon226/zig-cpython/blob/master/build.zig
+/// Build python as static lib
 fn buildLibPython(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
