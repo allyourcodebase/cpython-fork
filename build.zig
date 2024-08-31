@@ -21,7 +21,6 @@ pub fn build(b: *std.Build) !void {
     });
 
     const config_header = getConfigHeader(b, t);
-    // b.addInstallHeaderFile(source: LazyPath, dest_rel_path: []const u8)
 
     // zig build of python
     const libpython = try buildLibPython(b, target, optimize, config_header);
@@ -67,17 +66,6 @@ pub fn build(b: *std.Build) !void {
         run_step.dependOn(&run_cmd.step);
         examples_step.dependOn(&exe.step);
     }
-
-    const translate_step = b.step("translate", "Translates the c files");
-
-    const config_translate = translateFile(b, b.path("Include/cpython/initconfig.h"), target, optimize, config_header);
-    const translate_install = b.addInstallDirectory(.{
-        .source_dir = config_translate.getOutput(),
-        .install_dir = .{ .custom = "translate" },
-        .install_subdir = "headers",
-    });
-
-    translate_step.dependOn(&translate_install.step);
 }
 
 fn getModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.Mode) *std.Build.Module {
@@ -113,29 +101,6 @@ fn addIncludes(
     step.addIncludePath(b.path("."));
     step.addIncludePath(b.path("Include"));
     step.addConfigHeader(config_header);
-}
-
-fn translateFile(
-    b: *std.Build,
-    file: std.Build.LazyPath,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    config_header: *std.Build.Step.ConfigHeader,
-) *Step.TranslateC {
-    const step = b.addTranslateC(.{
-        .root_source_file = file,
-        .target = target,
-        .optimize = optimize,
-    });
-
-    step.step.dependOn(&config_header.step);
-
-    step.addIncludeDir(b.path("Include/internal").getPath(b));
-    step.addIncludeDir(b.path(".").getPath(b));
-    step.addIncludeDir(b.path("Include").getPath(b));
-    // step.addIncludeDir(config_header.output_file.getPath());
-
-    return step;
 }
 
 fn buildCpython(
