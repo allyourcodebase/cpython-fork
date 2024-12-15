@@ -814,7 +814,7 @@ pub fn build(b: *std.Build) void {
         "-fvisibility=hidden",
         "-DPy_BUILD_CORE",
 
-        "-DPYTHONPATH=\"\"",
+        std.fmt.allocPrint(b.allocator, "-DPYTHONPATH=\"{s}\"", .{b.path("Lib").getPath(b)}) catch @panic("OOM"),
         "-DPREFIX=\"/usr/local\"",
         "-DEXEC_PREFIX=\"/usr/local\"",
         "-DVERSION=\"3.11\"",
