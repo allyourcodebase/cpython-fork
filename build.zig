@@ -834,6 +834,17 @@ pub fn build(b: *std.Build) void {
         "-DSOABI=\"cpython-311-x86_64-linux-gnu\"",
     } });
     b.installArtifact(exe);
+
+    const write_files = b.addWriteFiles();
+    _ = write_files.addCopyDirectory(b.path("Lib"), "", .{});
+    const empty_dir = b.addWriteFiles().getDirectory();
+    _ = write_files.addCopyDirectory(empty_dir, "lib-dynload", .{});
+    const install_lib = b.addInstallDirectory(.{
+        .source_dir = write_files.getDirectory(),
+        .install_dir = .lib,
+        .install_subdir = "python3.11",
+    });
+    b.getInstallStep().dependOn(&install_lib.step);
 }
 
 fn have(x: bool) ?u1 {
