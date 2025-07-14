@@ -20,6 +20,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    // the following python program will crash if we enable sanitization:
+    //     import argparse
+    //     parser = argparse.ArgumentParser()
+    exe.root_module.sanitize_c = false;
+    exe.bundle_ubsan_rt = true;
+
     exe.linkLibrary(libz_dep.artifact("z"));
     exe.linkLibrary(openssl_dep.artifact("openssl"));
     exe.linkLibC();
