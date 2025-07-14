@@ -1497,7 +1497,8 @@ dictresize(PyDictObject *mp, uint8_t log2_newsize, int unicode)
             if (unicode) { // combined unicode -> combined unicode
                 PyDictUnicodeEntry *newentries = DK_UNICODE_ENTRIES(mp->ma_keys);
                 if (oldkeys->dk_nentries == numentries && mp->ma_keys->dk_kind == DICT_KEYS_UNICODE) {
-                    memcpy(newentries, oldentries, numentries * sizeof(PyDictUnicodeEntry));
+                    // avoid memcpy on 0 entries to avoid UB on oldentries
+                    if (numentries > 0) memcpy(newentries, oldentries, numentries * sizeof(PyDictUnicodeEntry));
                 }
                 else {
                     PyDictUnicodeEntry *ep = oldentries;
