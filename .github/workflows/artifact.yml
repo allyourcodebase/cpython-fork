@@ -32,3 +32,5 @@ jobs:
       - uses: mlugg/setup-zig@v2
       - run: |
           zig build ci --summary all
+      - run: |
+          zig build ci -Dversion=3.11.4 --summary all

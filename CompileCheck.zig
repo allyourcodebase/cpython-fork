@@ -27,8 +27,8 @@ pub const Kind = union(enum) {
 
 pub fn create(b: *std.Build, target: std.Build.ResolvedTarget, kind: Kind) *CompileCheck {
     const write_files = b.addWriteFiles();
-    const source_content = switch (kind) {
-        .exe => |src| src,
+    const source_duped = switch (kind) {
+        .exe => |src| b.dupe(src),
         .header => |h| b.fmt("#include <{s}>", .{h}),
     };
     const source_path = write_files.add(
@@ -36,7 +36,7 @@ pub fn create(b: *std.Build, target: std.Build.ResolvedTarget, kind: Kind) *Comp
             .exe => "compilecheck-exe.c",
             .header => "copmilecheck-header.c",
         },
-        source_content,
+        source_duped,
     );
     const check = b.allocator.create(CompileCheck) catch @panic("OOM");
     check.* = .{
@@ -51,10 +51,10 @@ pub fn create(b: *std.Build, target: std.Build.ResolvedTarget, kind: Kind) *Comp
         }),
         .target = target,
         .kind = switch (kind) {
-            .exe => |src| .{ .exe = b.dupe(src) },
+            .exe => .{ .exe = source_duped },
             .header => |h| .{ .header = b.dupe(h) },
         },
-        .source_content = source_content,
+        .source_content = source_duped,
         .source_path = source_path,
     };
     source_path.addStepDependencies(&check.step);

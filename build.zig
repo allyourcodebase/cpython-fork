@@ -1,3 +1,16 @@
+const Version = enum {
+    @"3.11.4",
+    @"3.12.11",
+    pub fn libName(self: Version) []const u8 {
+        return switch (self) {
+            .@"3.11.4" => "3.11",
+            .@"3.12.11" => "3.12",
+        };
+    }
+
+    pub const latest: Version = .@"3.12.11";
+};
+
 /// There are 3 stages of the python exe, the first two are used compile and embed modules for
 /// the next stage which is referred to as "freezing" modules.
 const PythonExeStage = union(enum) {
@@ -9,6 +22,7 @@ const PythonExeStage = union(enum) {
     final: struct {
         stage2: Stage2FrozenMods,
         deepfreeze_c: std.Build.LazyPath,
+        frozen_headers: []const std.Build.LazyPath,
     },
 
     pub fn stage2FrozenMods(self: PythonExeStage) ?Stage2FrozenMods {
@@ -23,9 +37,12 @@ const Stage2FrozenMods = struct {
     getpath_h: std.Build.LazyPath,
     importlib_bootstrap_h: std.Build.LazyPath,
     importlib_bootstrap_external_h: std.Build.LazyPath,
+    zipimport_h: std.Build.LazyPath,
 };
 
 pub fn build(b: *std.Build) !void {
+    const version: Version = b.option(Version, "version", "Python Version") orelse .latest;
+
     const replace_exe = b.addExecutable(.{
         .name = "replace",
         .root_module = b.createModule(.{
@@ -41,7 +58,10 @@ pub fn build(b: *std.Build) !void {
         }),
     });
 
-    const upstream = b.dependency("upstream", .{});
+    const upstream: *std.Build.Dependency = switch (version) {
+        .@"3.11.4" => if (b.lazyDependency("upstream_3.11.4", .{})) |d| d else noUpstream(b),
+        .@"3.12.11" => if (b.lazyDependency("upstream_3.12.11", .{})) |d| d else noUpstream(b),
+    };
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -63,17 +83,17 @@ pub fn build(b: *std.Build) !void {
         })) |dep| dep.artifact("openssl") else null) else null,
     };
 
-    const makesetup_host = addMakesetup(b, upstream, libs_host, .{
+    const makesetup_host = addMakesetup(b, version, upstream, libs_host, .{
         .os_tag = b.graph.host.result.os.tag,
         .replace_exe = replace_exe,
         .makesetup_exe = makesetup_exe,
     });
-    const makesetup_target = addMakesetup(b, upstream, libs_target, .{
+    const makesetup_target = addMakesetup(b, version, upstream, libs_target, .{
         .os_tag = target.result.os.tag,
         .replace_exe = replace_exe,
         .makesetup_exe = makesetup_exe,
     });
-    const pyconfig_host = try addPyconfig(b, upstream, b.graph.host, .{ .zlib = null, .openssl = null });
+    const pyconfig_host = try addPyconfig(b, version, upstream, b.graph.host, .{ .zlib = null, .openssl = null });
 
     const freeze_module_exe = addPythonExe(b, upstream, b.graph.host, .Debug, .{
         .name = "freeze_module",
@@ -101,34 +121,43 @@ pub fn build(b: *std.Build) !void {
             freeze.addFileArg(upstream.path("Lib/importlib/_bootstrap_external.py"));
             break :blk freeze.addOutputFileArg("Python/frozen_modules/importlib._bootstrap_external.h");
         },
+        .zipimport_h = blk: {
+            const freeze = b.addRunArtifact(freeze_module_exe);
+            freeze.addArg("zipimport");
+            freeze.addFileArg(upstream.path("Lib/zipimport.py"));
+            break :blk freeze.addOutputFileArg("Python/frozen_modules/zipimport.h");
+        },
     };
 
-    const deepfreeze_c = blk_deepfreeze_c: {
+    const frozen_headers, const deepfreeze_c = blk_deepfreeze_c: {
         const bootstrap_python_exe = addPythonExe(b, upstream, b.graph.host, .Debug, .{
             .name = "bootstrap_python",
             .makesetup_out = makesetup_host,
             .pyconfig = pyconfig_host,
             .stage = .{ .bootstrap = stage2_frozen_mods },
         });
-        const bootstrap_packaged = packagePython(b, upstream, bootstrap_python_exe);
+        const bootstrap_packaged = packagePython(b, version, upstream, bootstrap_python_exe);
 
         const frozen_headers = b.allocator.alloc(std.Build.LazyPath, frozen_modules.len) catch @panic("OOM");
         // don't free
 
         const freeze_step = b.step("freeze", "");
-        for (frozen_modules, frozen_module_names, frozen_headers) |mod_path, mod_name, *header| {
+        for (frozen_modules, frozenModuleNames(version), frozen_headers) |mod_path, mod_name, *header| {
             const freeze = std.Build.Step.Run.create(b, b.fmt("run _freeze_module.py for '{s}'", .{mod_path}));
             freeze.addFileArg(bootstrap_packaged.exe);
             freeze.addFileArg(upstream.path("Programs/_freeze_module.py"));
             freeze.addArg(mod_name);
             freeze.addFileArg(upstream.path(mod_path));
-            header.* = freeze.addOutputFileArg(b.fmt("{s}.h", .{mod_name}));
+            header.* = freeze.addOutputFileArg(b.fmt("frozen_modules/{s}.h", .{mod_name}));
             freeze_step.dependOn(&freeze.step);
         }
 
         const run = std.Build.Step.Run.create(b, "run deepfreeze.py");
         run.addFileArg(bootstrap_packaged.exe);
-        run.addFileArg(upstream.path("Tools/scripts/deepfreeze.py"));
+        run.addFileArg(upstream.path(switch (version) {
+            .@"3.11.4" => "Tools/scripts/deepfreeze.py",
+            else => "Tools/build/deepfreeze.py",
+        }));
         run.addArg("-o");
         const deepfreeze_c = run.addOutputFileArg("deepfreeze.c");
         {
@@ -136,6 +165,7 @@ pub fn build(b: *std.Build) !void {
             // have addSuffixedOutputArg.
             const AddModules = struct {
                 step: std.Build.Step,
+                version: Version,
                 run_deepfreeze: *std.Build.Step.Run,
                 headers: []const std.Build.LazyPath,
             };
@@ -144,7 +174,7 @@ pub fn build(b: *std.Build) !void {
                     _ = options;
                     const b2 = step.owner;
                     const self: *AddModules = @fieldParentPtr("step", step);
-                    for (frozen_module_names, self.headers) |mod_name, header| {
+                    for (frozenModuleNames(self.version), self.headers) |mod_name, header| {
                         self.run_deepfreeze.addArg(b2.fmt("{s}:{s}", .{ header.getPath(b2), mod_name }));
                     }
                 }
@@ -157,6 +187,7 @@ pub fn build(b: *std.Build) !void {
                     .owner = b,
                     .makeFn = &add_modules_make,
                 }),
+                .version = version,
                 .run_deepfreeze = run,
                 .headers = frozen_headers,
             };
@@ -165,21 +196,22 @@ pub fn build(b: *std.Build) !void {
         }
 
         b.step("deepfreeze", "").dependOn(&run.step);
-        break :blk_deepfreeze_c deepfreeze_c;
+        break :blk_deepfreeze_c .{ frozen_headers, deepfreeze_c };
     };
 
     const final_exe = addPythonExe(b, upstream, target, optimize, .{
         .name = "python",
         .makesetup_out = makesetup_target,
-        .pyconfig = try addPyconfig(b, upstream, target, libs_target),
+        .pyconfig = try addPyconfig(b, version, upstream, target, libs_target),
         .stage = .{
             .final = .{
                 .stage2 = stage2_frozen_mods,
+                .frozen_headers = frozen_headers,
                 .deepfreeze_c = deepfreeze_c,
             },
         },
     });
-    const final_packaged = packagePython(b, upstream, final_exe);
+    const final_packaged = packagePython(b, version, upstream, final_exe);
     const install_final = b.addInstallDirectory(.{
         .source_dir = final_packaged.root,
         .install_dir = .prefix,
@@ -189,16 +221,24 @@ pub fn build(b: *std.Build) !void {
 
     const ci_step = b.step("ci", "The build/test step to run on the CI");
     ci_step.dependOn(b.getInstallStep());
-    try ci(b, ssl_enabled, upstream, ci_step, .{
+    try ci(b, version, ssl_enabled, upstream, ci_step, .{
         .replace_exe = replace_exe,
         .makesetup_exe = makesetup_exe,
         .stage2_frozen_mods = stage2_frozen_mods,
+        .frozen_headers = frozen_headers,
         .deepfreeze_c = deepfreeze_c,
     });
 }
 
+fn noUpstream(b: *std.Build) *std.Build.Dependency {
+    const dependency = b.allocator.create(std.Build.Dependency) catch @panic("OOM");
+    dependency.* = .{ .builder = b };
+    return dependency;
+}
+
 fn addMakesetup(
     b: *std.Build,
+    version: Version,
     upstream: *std.Build.Dependency,
     libs: Libs,
     args: struct {
@@ -209,7 +249,7 @@ fn addMakesetup(
 ) std.Build.LazyPath {
     const is_posix = (args.os_tag != .windows);
 
-    const stdlib_modules = .{
+    const stdlib_modules_common = .{
         ._ssl = (libs.openssl != null),
         .zlib = (libs.zlib != null),
 
@@ -231,7 +271,6 @@ fn addMakesetup(
         ._socket = (args.os_tag != .windows),
         ._statistics = true,
         ._struct = true,
-        ._typing = true,
         ._zoneinfo = true,
         .array = true,
         .audioop = true,
@@ -264,8 +303,6 @@ fn addMakesetup(
 
         ._md5 = true,
         ._sha1 = true,
-        ._sha256 = true,
-        ._sha512 = true,
         ._sha3 = true,
         ._blake2 = true,
 
@@ -299,6 +336,16 @@ fn addMakesetup(
         .xxlimited_35 = false,
         ._xxsubinterpreters = false,
     };
+    const @"stdlib_modules_3.11.4" = .{
+        ._typing = true,
+        ._sha256 = true,
+        ._sha512 = true,
+    };
+    const @"stdlib_modules_3.12.11" = .{
+        ._sha2 = false,
+        .xxsubtype = false,
+        ._xxinterpchannels = false,
+    };
 
     const setup_bootstrap = blk: {
         const replace = b.addRunArtifact(args.replace_exe);
@@ -317,15 +364,13 @@ fn addMakesetup(
         const out = replace.addOutputFileArg("Setup.stdlib");
         replace.addArg("MODULE_{NAME}_TRUE=MODULE_{NAME}_TRUE");
         replace.addArg("MODULE_BUILDTYPE=static");
-        inline for (std.meta.fields(@TypeOf(stdlib_modules))) |field| {
-            const name = field.name;
-            const value = @field(stdlib_modules, name);
-            var upcase_buf: [100]u8 = undefined;
-            for (name, 0..) |c, i| {
-                upcase_buf[i] = std.ascii.toUpper(c);
-            }
-            const value_str = if (value) "" else "#";
-            replace.addArg(b.fmt("MODULE_{s}_TRUE={s}", .{ upcase_buf[0..name.len], value_str }));
+        addReplaceModuleArgs(b, replace, @TypeOf(stdlib_modules_common), stdlib_modules_common);
+        switch (version) {
+            .@"3.11.4" => addReplaceModuleArgs(b, replace, @TypeOf(@"stdlib_modules_3.11.4"), @"stdlib_modules_3.11.4"),
+            .@"3.12.11" => {
+                replace.addArg("MODULE__CTYPES_MALLOC_CLOSURE=");
+                addReplaceModuleArgs(b, replace, @TypeOf(@"stdlib_modules_3.12.11"), @"stdlib_modules_3.12.11");
+            },
         }
         break :blk_stdlib out;
     };
@@ -339,14 +384,27 @@ fn addMakesetup(
     return makesetup_out;
 }
 
-fn packagePython(b: *std.Build, upstream: *std.Build.Dependency, exe: *std.Build.Step.Compile) struct {
+fn addReplaceModuleArgs(b: *std.Build, replace: *std.Build.Step.Run, comptime Modules: type, modules: Modules) void {
+    inline for (std.meta.fields(Modules)) |field| {
+        const name = field.name;
+        const value = @field(modules, name);
+        var upcase_buf: [100]u8 = undefined;
+        for (name, 0..) |c, i| {
+            upcase_buf[i] = std.ascii.toUpper(c);
+        }
+        const value_str = if (value) "" else "#";
+        replace.addArg(b.fmt("MODULE_{s}_TRUE={s}", .{ upcase_buf[0..name.len], value_str }));
+    }
+}
+
+fn packagePython(b: *std.Build, version: Version, upstream: *std.Build.Dependency, exe: *std.Build.Step.Compile) struct {
     root: std.Build.LazyPath,
     exe: std.Build.LazyPath,
 } {
     const write_files = b.addWriteFiles();
-    _ = write_files.addCopyDirectory(upstream.path("Lib"), "lib/python3.11", .{});
+    _ = write_files.addCopyDirectory(upstream.path("Lib"), b.fmt("lib/python{s}", .{version.libName()}), .{});
     const empty_dir = b.addWriteFiles().getDirectory();
-    _ = write_files.addCopyDirectory(empty_dir, "lib/python3.11/lib-dynload", .{});
+    _ = write_files.addCopyDirectory(empty_dir, b.fmt("lib/python{s}/lib-dynload", .{version.libName()}), .{});
     if (exe.producesPdbFile()) {
         _ = write_files.addCopyFile(exe.getEmittedPdb(), b.fmt("bin/{s}.pdb", .{exe.name}));
     }
@@ -377,17 +435,25 @@ fn addPythonExe(
         .optimize = optimize,
     });
 
-    // workaround dictobject.c memcpy alignment issue
-    exe.root_module.sanitize_c = false;
-    // exe.bundle_ubsan_rt = true;
+    switch (args.pyconfig.version) {
+        .@"3.11.4" => {
+            // workaround dictobject.c memcpy alignment issue
+            exe.root_module.sanitize_c = false;
+        },
+        .@"3.12.11" => {},
+    }
 
     exe.root_module.addCMacro("Py_BUILD_CORE", "");
+    exe.root_module.addCMacro("_GNU_SOURCE", "");
     switch (optimize) {
         .Debug => {},
         .ReleaseSafe, .ReleaseSmall, .ReleaseFast => {
-            const @"release_date_3.11" = "June 6, 2023";
+            const release_date = switch (args.pyconfig.version) {
+                .@"3.11.4" => "June 6, 2023",
+                .@"3.12.11" => "June 3, 2025",
+            };
             // need to redefine __DATE__ and __TIME__ for a reproducible build
-            exe.root_module.addCMacro("__DATE__", "\"" ++ @"release_date_3.11" ++ "\"");
+            exe.root_module.addCMacro("__DATE__", b.fmt("\"{s}\"", .{release_date}));
             exe.root_module.addCMacro("__TIME__", "\"00:00:00\"");
         },
     }
@@ -408,6 +474,17 @@ fn addPythonExe(
         exe.addIncludePath(mods.getpath_h.dirname().dirname());
         exe.addIncludePath(mods.importlib_bootstrap_h.dirname().dirname().dirname());
         exe.addIncludePath(mods.importlib_bootstrap_external_h.dirname().dirname().dirname());
+        exe.addIncludePath(mods.zipimport_h.dirname().dirname().dirname());
+    }
+
+    switch (args.stage) {
+        .freeze_module, .bootstrap => {},
+        .final => |final| switch (args.pyconfig.version) {
+            .@"3.11.4" => {},
+            else => for (final.frozen_headers) |h| {
+                exe.addIncludePath(h.dirname().dirname());
+            },
+        },
     }
 
     const flags_common = [_][]const u8{
@@ -420,33 +497,44 @@ fn addPythonExe(
     {
         const AddModules = struct {
             step: std.Build.Step,
-            root: std.Build.LazyPath,
+            upstream: *std.Build.Dependency,
             exe: *std.Build.Step.Compile,
-            sources: std.Build.LazyPath,
+            module_compile_args_file: std.Build.LazyPath,
         };
         const add_modules_make = struct {
             fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
                 _ = options;
                 const self: *AddModules = @fieldParentPtr("step", step);
-                const sources = blk: {
-                    var file = try std.fs.cwd().openFile(self.sources.getPath2(step.owner, step), .{});
+                const module_compile_args = blk: {
+                    var file = try std.fs.cwd().openFile(self.module_compile_args_file.getPath2(step.owner, step), .{});
                     defer file.close();
                     break :blk try file.readToEndAlloc(step.owner.allocator, std.math.maxInt(usize));
                 };
-                defer step.owner.allocator.free(sources);
+                defer step.owner.allocator.free(module_compile_args);
 
                 var files: std.ArrayListUnmanaged([]const u8) = .{};
                 defer files.deinit(step.owner.allocator);
 
-                var line_it = std.mem.splitScalar(u8, sources, '\n');
+                var line_it = std.mem.splitScalar(u8, module_compile_args, '\n');
                 while (line_it.next()) |line| {
                     if (line.len == 0) continue;
                     if (std.mem.startsWith(u8, line, "# ")) continue;
-                    try files.append(step.owner.allocator, line);
+                    if (std.mem.endsWith(u8, line, ".c")) {
+                        try files.append(step.owner.allocator, line);
+                    } else if (std.mem.startsWith(u8, line, "-I")) {
+                        const path = line[2..];
+                        const prefix = "$(srcdir)/";
+                        if (!std.mem.startsWith(u8, path, prefix)) std.debug.panic(
+                            "expected include path to start with '-I{s}' but got: '{s}'",
+                            .{ prefix, line },
+                        );
+                        const inc_sub_path = step.owner.dupe(path[prefix.len..]);
+                        self.exe.addIncludePath(self.upstream.path(inc_sub_path));
+                    } else std.debug.panic("todo: parse module-compile-args line '{s}'", .{line});
                 }
 
                 self.exe.root_module.addCSourceFiles(.{
-                    .root = self.root,
+                    .root = self.upstream.path("."),
                     .files = files.items,
                     .flags = &flags_common,
                 });
@@ -456,36 +544,52 @@ fn addPythonExe(
         add_modules.* = .{
             .step = std.Build.Step.init(.{
                 .id = .custom,
-                .name = b.fmt("add module sources to {s} exe", .{exe.name}),
+                .name = b.fmt("add module sources/includes to {s} exe", .{exe.name}),
                 .owner = b,
                 .makeFn = &add_modules_make,
             }),
-            .root = upstream.path("."),
+            .upstream = upstream,
             .exe = exe,
-            .sources = args.makesetup_out.path(b, "sources.txt"),
+            .module_compile_args_file = args.makesetup_out.path(b, "module-compile-args.txt"),
         };
-        add_modules.sources.addStepDependencies(&add_modules.step);
+        add_modules.module_compile_args_file.addStepDependencies(&add_modules.step);
         exe.step.dependOn(&add_modules.step);
     }
-
-    const library_src_omit_frozen = (parser_src ++ object_src ++ python_src ++ module_src);
 
     exe.addCSourceFiles(.{
         .root = upstream.path("."),
         .files = switch (args.stage) {
-            .freeze_module => &([_][]const u8{
-                "Programs/_freeze_module.c",
-                "Modules/getbuildinfo.c",
-                "Modules/getpath_noop.c",
-            } ++ library_src_omit_frozen),
-            .bootstrap => &([_][]const u8{
-                "Programs/_bootstrap_python.c",
-                "Modules/getbuildinfo.c",
-            } ++ library_src_omit_frozen),
-            .final => &(parser_src ++ object_src ++ python_src ++ module_src ++ [_][]const u8{
-                "Programs/python.c",
-                "Modules/getbuildinfo.c",
-                "Python/frozen.c",
+            .freeze_module => concat(b.allocator, &.{
+                &.{
+                    "Programs/_freeze_module.c",
+                    "Modules/getbuildinfo.c",
+                    "Modules/getpath_noop.c",
+                },
+                switch (args.pyconfig.version) {
+                    .@"3.11.4" => &library_src_omit_frozen.@"3.11.4",
+                    .@"3.12.11" => &library_src_omit_frozen.@"3.12.11",
+                },
+            }),
+            .bootstrap => concat(b.allocator, &.{
+                &.{
+                    "Programs/_bootstrap_python.c",
+                    "Modules/getbuildinfo.c",
+                },
+                switch (args.pyconfig.version) {
+                    .@"3.11.4" => &library_src_omit_frozen.@"3.11.4",
+                    .@"3.12.11" => &library_src_omit_frozen.@"3.12.11",
+                },
+            }),
+            .final => concat(b.allocator, &.{
+                &.{
+                    "Programs/python.c",
+                    "Modules/getbuildinfo.c",
+                    "Python/frozen.c",
+                },
+                switch (args.pyconfig.version) {
+                    .@"3.11.4" => &library_src_omit_frozen.@"3.11.4",
+                    .@"3.12.11" => &library_src_omit_frozen.@"3.12.11",
+                },
             }),
         },
         .flags = &flags_common,
@@ -503,7 +607,7 @@ fn addPythonExe(
             .flags = &(flags_common ++ [_][]const u8{
                 "-DPREFIX=\"\"",
                 "-DEXEC_PREFIX=\"\"",
-                "-DVERSION=\"3.11\"",
+                b.fmt("-DVERSION=\"{s}\"", .{args.pyconfig.version.libName()}),
                 "-DPLATLIBDIR=\"lib\"",
             }),
         }),
@@ -545,6 +649,7 @@ fn addPythonExe(
 }
 
 const Pyconfig = struct {
+    version: Version,
     libs: Libs,
     header: union(enum) {
         path: std.Build.LazyPath,
@@ -557,154 +662,8 @@ const Libs = struct {
     openssl: ?*std.Build.Step.Compile,
 };
 
-fn addPyconfig(
-    b: *std.Build,
-    upstream: *std.Build.Dependency,
-    target: std.Build.ResolvedTarget,
-    libs: Libs,
-) !Pyconfig {
-    const t = target.result;
-    if (t.os.tag == .windows) return .{
-        .libs = libs,
-        .header = .{ .path = upstream.path("PC/pyconfig.h") },
-    };
-    const config_header = b.addConfigHeader(.{
-        .style = .{ .autoconf = upstream.path("pyconfig.h.in") },
-        .include_path = "pyconfig.h",
-    }, .{
-        .ALIGNOF_LONG = 8,
-        .ALIGNOF_SIZE_T = 8,
-        .DOUBLE_IS_LITTLE_ENDIAN_IEEE754 = 1,
-        .ENABLE_IPV6 = 1,
-        .MAJOR_IN_SYSMACROS = have(t.os.tag == .linux),
-        .PTHREAD_KEY_T_IS_COMPATIBLE_WITH_INT = 1,
-        .PTHREAD_SYSTEM_SCHED_SUPPORTED = 1,
-        .PY_BUILTIN_HASHLIB_HASHES = "md5,sha1,sha256,sha512,sha3,blake2",
-        .PY_COERCE_C_LOCALE = 1,
-        .PY_FORMAT_SIZE_T = "z",
-        .PY_SSL_DEFAULT_CIPHERS = 1,
-        .PY_SUPPORT_TIER = 2,
-        .RETSIGTYPE = .void,
-        .SIZEOF_DOUBLE = 8,
-        .SIZEOF_FLOAT = 4,
-        .SIZEOF_FPOS_T = 16,
-        .SIZEOF_INT = 4,
-        .SIZEOF_LONG = 8,
-        .SIZEOF_LONG_DOUBLE = 16,
-        .SIZEOF_LONG_LONG = 8,
-        .SIZEOF_OFF_T = 8,
-        .SIZEOF_PID_T = 4,
-        .SIZEOF_PTHREAD_KEY_T = 4,
-        .SIZEOF_PTHREAD_T = 8,
-        .SIZEOF_SHORT = 2,
-        .SIZEOF_SIZE_T = 8,
-        .SIZEOF_TIME_T = 8,
-        .SIZEOF_UINTPTR_T = 8,
-        .SIZEOF_VOID_P = 8,
-        .SIZEOF_WCHAR_T = 4,
-        .SIZEOF__BOOL = 1,
-        .STDC_HEADERS = 1,
-        .SYS_SELECT_WITH_SYS_TIME = 1,
-        .TIME_WITH_SYS_TIME = 1,
-        .WITH_DECIMAL_CONTEXTVAR = 1,
-        .WITH_DOC_STRINGS = 1,
-        .WITH_FREELISTS = 1,
-        .WITH_PYMALLOC = 1,
-        ._DARWIN_C_SOURCE = 1,
-        ._FILE_OFFSET_BITS = 64,
-        ._LARGEFILE_SOURCE = 1,
-        ._NETBSD_SOURCE = 1,
-        ._POSIX_C_SOURCE = .@"200809L",
-        ._PYTHONFRAMEWORK = "",
-        ._REENTRANT = 1,
-        ._XOPEN_SOURCE = 700,
-        ._XOPEN_SOURCE_EXTENDED = 1,
-        .__BSD_VISIBLE = 1,
-        ._ALL_SOURCE = 1,
-        ._GNU_SOURCE = 1,
-        ._POSIX_PTHREAD_SEMANTICS = 1,
-        ._TANDEM_SOURCE = 1,
-        .__EXTENSIONS__ = 1,
-
-        .AC_APPLE_UNIVERSAL_BUILD = null,
-        .AIX_BUILDDATE = null,
-        .AIX_GENUINE_CPLUSPLUS = null,
-        .ALT_SOABI = null,
-        .ANDROID_API_LEVEL = null,
-        .DOUBLE_IS_ARM_MIXED_ENDIAN_IEEE754 = null,
-        .DOUBLE_IS_BIG_ENDIAN_IEEE754 = null,
-        .FLOAT_WORDS_BIGENDIAN = null,
-        .GETPGRP_HAVE_ARG = null,
-        .MAJOR_IN_MKDEV = null,
-        .MVWDELCH_IS_EXPRESSION = null,
-        .PACKAGE_BUGREPORT = null,
-        .PACKAGE_NAME = null,
-        .PACKAGE_STRING = null,
-        .PACKAGE_TARNAME = null,
-        .PACKAGE_URL = null,
-        .PACKAGE_VERSION = null,
-        .POSIX_SEMAPHORES_NOT_ENABLED = null,
-        .PYLONG_BITS_IN_DIGIT = null,
-        .PY_SQLITE_ENABLE_LOAD_EXTENSION = null,
-        .PY_SQLITE_HAVE_SERIALIZE = null,
-        .PY_SSL_DEFAULT_CIPHER_STRING = null,
-        .Py_DEBUG = null,
-        .Py_ENABLE_SHARED = null,
-        .Py_HASH_ALGORITHM = null,
-        .Py_STATS = null,
-        .Py_TRACE_REFS = null,
-        .SETPGRP_HAVE_ARG = null,
-        .SIGNED_RIGHT_SHIFT_ZERO_FILLS = null,
-        .THREAD_STACK_SIZE = null,
-        .TIMEMODULE_LIB = null,
-        .TM_IN_SYS_TIME = null,
-        .USE_COMPUTED_GOTOS = null,
-        .WINDOW_HAS_FLAGS = null,
-        .WITH_DTRACE = null,
-        .WITH_DYLD = null,
-        .WITH_EDITLINE = null,
-        .WITH_LIBINTL = null,
-        .WITH_NEXT_FRAMEWORK = null,
-        .WITH_VALGRIND = null,
-        .X87_DOUBLE_ROUNDING = null,
-        ._BSD_SOURCE = null,
-        ._INCLUDE__STDC_A1_SOURCE = null,
-        ._LARGE_FILES = null,
-        ._MINIX = null,
-        ._POSIX_1_SOURCE = null,
-        ._POSIX_SOURCE = null,
-        ._POSIX_THREADS = null,
-        ._WASI_EMULATED_GETPID = null,
-        ._WASI_EMULATED_PROCESS_CLOCKS = null,
-        ._WASI_EMULATED_SIGNAL = null,
-        .clock_t = null,
-        .@"const" = null,
-        .gid_t = null,
-        .mode_t = null,
-        .off_t = null,
-        .pid_t = null,
-        .signed = null,
-        .size_t = null,
-        .socklen_t = null,
-        .uid_t = null,
-        .WORDS_BIGENDIAN = null,
-
-        .HAVE_BROKEN_MBSTOWCS = null,
-        .HAVE_BROKEN_NICE = null,
-        .HAVE_BROKEN_PIPE_BUF = null,
-        .HAVE_BROKEN_POLL = null,
-        .HAVE_BROKEN_POSIX_SEMAPHORES = null,
-        .HAVE_BROKEN_PTHREAD_SIGMASK = null,
-        .HAVE_BROKEN_SEM_GETVALUE = null,
-        .HAVE_BROKEN_UNSETENV = null,
-
-        .HAVE_PTHREAD_STUBS = null,
-        .HAVE_USABLE_WCHAR_T = null,
-        .HAVE_NON_UNICODE_WCHAR_T_REPRESENTATION = null,
-        .HAVE_CHROOT = have(t.os.tag == .linux),
-    });
-
-    const header_configs = .{
+const header_config_set = struct {
+    const common = .{
         .{ .HAVE_ALLOCA_H, "alloca.h" },
         .{ .HAVE_ASM_TYPES_H, "asm/types.h" },
         .{ .HAVE_BLUETOOTH_H, "bluetooth.h" },
@@ -780,7 +739,6 @@ fn addPyconfig(
         .{ .HAVE_UTMP_H, "utmp.h" },
         .{ .HAVE_WCHAR_H, "wchar.h" },
         .{ .HAVE_LZMA_H, "lzma.h" },
-        .{ .HAVE_MEMORY_H, "memory.h" },
         .{ .HAVE_NCURSES_H, "ncurses.h" },
         .{ .HAVE_NDBM_H, "ndmb.h" },
         .{ .HAVE_NDIR_H, "ndir.h" },
@@ -809,7 +767,24 @@ fn addPyconfig(
         .{ .HAVE_UUID_UUID_H, "uuid/uuid.h" },
         .{ .HAVE_ZLIB_H, "zlib.h" },
     };
-    const exe_configs = .{
+    pub const @"3.11.4" = concatConfigs(common, .{
+        .{ .HAVE_MEMORY_H, "memory.h" },
+    });
+    pub const @"3.12.11" = concatConfigs(common, .{
+        .{ .HAVE_EDITLINE_READLINE_H, "editline/readline.h" },
+        .{ .HAVE_LINUX_FS_H, "linux/fs.h" },
+        .{ .HAVE_LINUX_LIMITS_H, "linux/limits.h" },
+        .{ .HAVE_MINIX_CONFIG_H, "minix/config.h" },
+        .{ .HAVE_NET_ETHERNET_H, "net/ethernet.h" },
+        .{ .HAVE_PANEL_H, "panel.h" },
+        .{ .HAVE_READLINE_READLINE_H, "readline/readline.h" },
+        .{ .HAVE_STDIO_H, "stdio.h" },
+        .{ .HAVE_SYS_PIDFD_H, "sys/pidfd.h" },
+    });
+};
+
+const exe_config_set = struct {
+    const common = .{
         .{ .HAVE_ACCEPT, "#include <sys/socket.h>\nint main(){accept(0, 0, 0);}" },
         .{ .HAVE_ACCEPT4, "#include <sys/socket.h>\nint main(){accept4(0, 0, 0, 0);}" },
         .{ .HAVE_ACOSH, "#include <math.h>\nint main(){acosh(1.0);}" },
@@ -1033,7 +1008,6 @@ fn addPyconfig(
         .{ .HAVE_TMPNAM, "#include <stdio.h>\nint main(){tmpnam(0);}" },
         .{ .HAVE_TMPNAM_R, "#include <stdio.h>\nint main(){tmpnam_r(0);}" },
         .{ .HAVE_TRUNCATE, "#include <unistd.h>\nint main(){truncate(0, 0);}" },
-        .{ .HAVE_TTYNAME, "#include <unistd.h>\nint main(){ttyname(0);}" },
         .{ .HAVE_UMASK, "#include <sys/stat.h>\nint main(){umask(0);}" },
         .{ .HAVE_UNAME, "#include <sys/utsname.h>\nint main(){struct utsname uts; uname(&uts);}" },
         .{ .HAVE_UNLINKAT, "#include <unistd.h>\nint main(){unlinkat(0, 0, 0);}" },
@@ -1160,10 +1134,7 @@ fn addPyconfig(
         .{ .HAVE_LIBDB, "#include <db.h>\nint main(){DB *db; return 0;}" },
         .{ .HAVE_LIBDL, "#include <dlfcn.h>\nint main(){dlopen(\"test\", RTLD_NOW); return 0;}" },
         .{ .HAVE_LIBDLD, "int main(){return 0;}" }, // DLD library check
-        .{ .HAVE_LIBGDBM_COMPAT, "#include <gdbm.h>\nint main(){GDBM_FILE gf; return 0;}" },
         .{ .HAVE_LIBIEEE, "int main(){return 0;}" }, // IEEE math library
-        .{ .HAVE_LIBNDBM, "#include <ndbm.h>\nint main(){DBM *db; return 0;}" },
-        .{ .HAVE_LIBREADLINE, "#include <readline/readline.h>\nint main(){readline(\"prompt\"); return 0;}" },
         .{ .HAVE_LIBRESOLV, "#include <resolv.h>\nint main(){res_init(); return 0;}" },
         .{ .HAVE_LIBSENDFILE, "#include <sys/sendfile.h>\nint main(){sendfile(0, 0, NULL, 0); return 0;}" },
         .{ .HAVE_LIBSQLITE3, "#include <sqlite3.h>\nint main(){sqlite3 *db; return 0;}" },
@@ -1211,7 +1182,6 @@ fn addPyconfig(
         .{ .HAVE_SSIZE_T, "#include <sys/types.h>\nint main(){ssize_t s = 0; return (int)s;}" },
         .{ .HAVE_STAT_TV_NSEC, "#include <sys/stat.h>\nint main(){struct stat st; return st.st_mtim.tv_nsec;}" },
         .{ .HAVE_STAT_TV_NSEC2, "#include <sys/stat.h>\nint main(){struct stat st; return st.st_mtimensec;}" },
-        .{ .HAVE_STDARG_PROTOTYPES, "#include <stdarg.h>\nvoid test(int x, ...); int main(){test(1, 2); return 0;} void test(int x, ...){va_list ap; va_start(ap, x); va_end(ap);}" },
         .{ .HAVE_STD_ATOMIC, "#include <stdatomic.h>\nint main(){atomic_int x; atomic_uintptr_t y; return 0;}" },
 
         // Struct member checks
@@ -1232,23 +1202,235 @@ fn addPyconfig(
         .{ .HAVE_WORKING_TZSET, "#include <time.h>\nint main(){tzset(); return 0;}" },
         .{ .HAVE_ZLIB_COPY, "#include <zlib.h>\nint main(){z_stream strm; inflateCopy(&strm, &strm); return 0;}" },
     };
+    pub const @"3.11.4" = concatConfigs(common, .{
+        .{ .HAVE_TTYNAME, "#include <unistd.h>\nint main(){ttyname(0);}" },
+        .{ .HAVE_LIBGDBM_COMPAT, "#include <gdbm.h>\nint main(){GDBM_FILE gf; return 0;}" },
+        .{ .HAVE_LIBNDBM, "#include <ndbm.h>\nint main(){DBM *db; return 0;}" },
+        .{ .HAVE_LIBREADLINE, "#include <readline/readline.h>\nint main(){readline(\"prompt\"); return 0;}" },
+        .{ .HAVE_STDARG_PROTOTYPES, "#include <stdarg.h>\nvoid test(int x, ...); int main(){test(1, 2); return 0;} void test(int x, ...){va_list ap; va_start(ap, x); va_end(ap);}" },
+    });
+    pub const @"3.12.11" = concatConfigs(common, .{
+        .{ .HAVE_FFI_CLOSURE_ALLOC, "#include <ffi.h>\nint main(){ffi_closure_alloc(0, 0);}" },
+        .{ .HAVE_FFI_PREP_CIF_VAR, "#include <ffi.h>\nint main(){ffi_prep_cif_var(0, 0, 0, 0, 0, 0);}" },
+        .{ .HAVE_FFI_PREP_CLOSURE_LOC, "#include <ffi.h>\nint main(){ffi_prep_closure_loc(0, 0, 0, 0, 0);}" },
+        .{ .HAVE_SETNS, "#define _GNU_SOURCE\n#include <sched.h>\nint main(){setns(0, 0);}" },
+        .{ .HAVE_TTYNAME_R, "#include <unistd.h>\nint main(){char buf[256]; ttyname_r(0, buf, sizeof(buf));}" },
+        .{ .HAVE_UNSHARE, "#define _GNU_SOURCE\n#include <unistd.h>\nint main(){unshare(0);}" },
+    });
+};
+
+fn addPyconfig(
+    b: *std.Build,
+    version: Version,
+    upstream: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    libs: Libs,
+) !Pyconfig {
+    const t = target.result;
+    if (t.os.tag == .windows) return .{
+        .version = version,
+        .libs = libs,
+        .header = .{ .path = upstream.path("PC/pyconfig.h") },
+    };
+
+    const config_header = b.addConfigHeader(.{
+        .style = .{ .autoconf = upstream.path("pyconfig.h.in") },
+        .include_path = "pyconfig.h",
+    }, .{
+        .ALIGNOF_LONG = 8,
+        .ALIGNOF_SIZE_T = 8,
+        .DOUBLE_IS_LITTLE_ENDIAN_IEEE754 = 1,
+        .ENABLE_IPV6 = 1,
+        .MAJOR_IN_SYSMACROS = have(t.os.tag == .linux),
+        .PTHREAD_KEY_T_IS_COMPATIBLE_WITH_INT = 1,
+        .PTHREAD_SYSTEM_SCHED_SUPPORTED = 1,
+        .PY_BUILTIN_HASHLIB_HASHES = "md5,sha1,sha256,sha512,sha3,blake2",
+        .PY_COERCE_C_LOCALE = 1,
+        .PY_SSL_DEFAULT_CIPHERS = 1,
+        .PY_SUPPORT_TIER = 2,
+        .RETSIGTYPE = .void,
+        .SIZEOF_DOUBLE = 8,
+        .SIZEOF_FLOAT = 4,
+        .SIZEOF_FPOS_T = 16,
+        .SIZEOF_INT = 4,
+        .SIZEOF_LONG = 8,
+        .SIZEOF_LONG_DOUBLE = 16,
+        .SIZEOF_LONG_LONG = 8,
+        .SIZEOF_OFF_T = 8,
+        .SIZEOF_PID_T = 4,
+        .SIZEOF_PTHREAD_KEY_T = 4,
+        .SIZEOF_PTHREAD_T = 8,
+        .SIZEOF_SHORT = 2,
+        .SIZEOF_SIZE_T = 8,
+        .SIZEOF_TIME_T = 8,
+        .SIZEOF_UINTPTR_T = 8,
+        .SIZEOF_VOID_P = 8,
+        .SIZEOF_WCHAR_T = 4,
+        .SIZEOF__BOOL = 1,
+        .STDC_HEADERS = 1,
+        .SYS_SELECT_WITH_SYS_TIME = 1,
+        .WITH_DECIMAL_CONTEXTVAR = 1,
+        .WITH_DOC_STRINGS = 1,
+        .WITH_FREELISTS = 1,
+        .WITH_PYMALLOC = 1,
+        ._DARWIN_C_SOURCE = 1,
+        ._FILE_OFFSET_BITS = 64,
+        ._LARGEFILE_SOURCE = 1,
+        ._NETBSD_SOURCE = 1,
+        ._POSIX_C_SOURCE = .@"200809L",
+        ._PYTHONFRAMEWORK = "",
+        ._REENTRANT = 1,
+        ._XOPEN_SOURCE = 700,
+        ._XOPEN_SOURCE_EXTENDED = 1,
+        .__BSD_VISIBLE = 1,
+        ._ALL_SOURCE = 1,
+        ._GNU_SOURCE = 1,
+        ._POSIX_PTHREAD_SEMANTICS = 1,
+        ._TANDEM_SOURCE = 1,
+        .__EXTENSIONS__ = 1,
+
+        .AC_APPLE_UNIVERSAL_BUILD = null,
+        .AIX_BUILDDATE = null,
+        .AIX_GENUINE_CPLUSPLUS = null,
+        .ALT_SOABI = null,
+        .ANDROID_API_LEVEL = null,
+        .DOUBLE_IS_ARM_MIXED_ENDIAN_IEEE754 = null,
+        .DOUBLE_IS_BIG_ENDIAN_IEEE754 = null,
+        .GETPGRP_HAVE_ARG = null,
+        .MAJOR_IN_MKDEV = null,
+        .MVWDELCH_IS_EXPRESSION = null,
+        .PACKAGE_BUGREPORT = null,
+        .PACKAGE_NAME = null,
+        .PACKAGE_STRING = null,
+        .PACKAGE_TARNAME = null,
+        .PACKAGE_URL = null,
+        .PACKAGE_VERSION = null,
+        .POSIX_SEMAPHORES_NOT_ENABLED = null,
+        .PYLONG_BITS_IN_DIGIT = null,
+        .PY_SQLITE_ENABLE_LOAD_EXTENSION = null,
+        .PY_SQLITE_HAVE_SERIALIZE = null,
+        .PY_SSL_DEFAULT_CIPHER_STRING = null,
+        .Py_DEBUG = null,
+        .Py_ENABLE_SHARED = null,
+        .Py_HASH_ALGORITHM = null,
+        .Py_STATS = null,
+        .Py_TRACE_REFS = null,
+        .SETPGRP_HAVE_ARG = null,
+        .SIGNED_RIGHT_SHIFT_ZERO_FILLS = null,
+        .THREAD_STACK_SIZE = null,
+        .TIMEMODULE_LIB = null,
+        .TM_IN_SYS_TIME = null,
+        .USE_COMPUTED_GOTOS = null,
+        .WINDOW_HAS_FLAGS = null,
+        .WITH_DTRACE = null,
+        .WITH_DYLD = null,
+        .WITH_EDITLINE = null,
+        .WITH_LIBINTL = null,
+        .WITH_NEXT_FRAMEWORK = null,
+        .WITH_VALGRIND = null,
+        .X87_DOUBLE_ROUNDING = null,
+        ._BSD_SOURCE = null,
+        ._INCLUDE__STDC_A1_SOURCE = null,
+        ._LARGE_FILES = null,
+        ._MINIX = null,
+        ._POSIX_1_SOURCE = null,
+        ._POSIX_SOURCE = null,
+        ._POSIX_THREADS = null,
+        ._WASI_EMULATED_GETPID = null,
+        ._WASI_EMULATED_PROCESS_CLOCKS = null,
+        ._WASI_EMULATED_SIGNAL = null,
+        .clock_t = null,
+        .@"const" = null,
+        .gid_t = null,
+        .mode_t = null,
+        .off_t = null,
+        .pid_t = null,
+        .signed = null,
+        .size_t = null,
+        .socklen_t = null,
+        .uid_t = null,
+        .WORDS_BIGENDIAN = null,
+
+        .HAVE_BROKEN_MBSTOWCS = null,
+        .HAVE_BROKEN_NICE = null,
+        .HAVE_BROKEN_PIPE_BUF = null,
+        .HAVE_BROKEN_POLL = null,
+        .HAVE_BROKEN_POSIX_SEMAPHORES = null,
+        .HAVE_BROKEN_PTHREAD_SIGMASK = null,
+        .HAVE_BROKEN_SEM_GETVALUE = null,
+        .HAVE_BROKEN_UNSETENV = null,
+
+        .HAVE_PTHREAD_STUBS = null,
+        .HAVE_USABLE_WCHAR_T = null,
+        .HAVE_NON_UNICODE_WCHAR_T_REPRESENTATION = null,
+        .HAVE_CHROOT = have(t.os.tag == .linux),
+    });
+    switch (version) {
+        .@"3.11.4" => config_header.addValues(.{
+            .PY_FORMAT_SIZE_T = "z",
+            .TIME_WITH_SYS_TIME = 1,
+            .FLOAT_WORDS_BIGENDIAN = null,
+        }),
+        .@"3.12.11" => config_header.addValues(.{
+            .ALIGNOF_MAX_ALIGN_T = @as(u32, switch (t.cpu.arch) {
+                .x86_64, .aarch64 => 16,
+                .x86, .arm => 8,
+                else => 8,
+            }),
+
+            // ncurses library (static configuration, not function test)
+            .HAVE_NCURSESW = null,
+
+            // Readline type (static configuration, not function test)
+            .HAVE_RL_COMPDISP_FUNC_T = null,
+
+            // Performance trampoline feature
+            .PY_HAVE_PERF_TRAMPOLINE = null,
+
+            // Platform-specific version defines
+            .Py_SUNOS_VERSION = null,
+            ._HPUX_ALT_XOPEN_SOCKET_API = null,
+            ._OPENBSD_SOURCE = null,
+
+            // C standard feature test macros (all set to null as they're optional)
+            .__STDC_WANT_IEC_60559_ATTRIBS_EXT__ = null,
+            .__STDC_WANT_IEC_60559_BFP_EXT__ = null,
+            .__STDC_WANT_IEC_60559_DFP_EXT__ = null,
+            .__STDC_WANT_IEC_60559_FUNCS_EXT__ = null,
+            .__STDC_WANT_IEC_60559_TYPES_EXT__ = null,
+            .__STDC_WANT_LIB_EXT2__ = null,
+            .__STDC_WANT_MATH_SPEC_FUNCS__ = null,
+        }),
+    }
+
+    const header_configs: []const Config = switch (version) {
+        .@"3.11.4" => &header_config_set.@"3.11.4",
+        .@"3.12.11" => &header_config_set.@"3.12.11",
+    };
+    const exe_configs: []const Config = switch (version) {
+        .@"3.11.4" => &exe_config_set.@"3.11.4",
+        .@"3.12.11" => &exe_config_set.@"3.12.11",
+    };
 
     {
         const AddValues = struct {
             step: std.Build.Step,
+            version: Version,
             config_header: *std.Build.Step.ConfigHeader,
-            header_checks: [header_configs.len]*CompileCheck,
-            exe_checks: [exe_configs.len]*CompileCheck,
+            header_configs: []const Config,
+            header_checks: []*CompileCheck,
+            exe_configs: []const Config,
+            exe_checks: []*CompileCheck,
         };
         const add_values_make = struct {
             fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
                 _ = options;
                 const self: *AddValues = @fieldParentPtr("step", step);
-                inline for (header_configs, self.header_checks) |header_config, header_check| {
-                    self.config_header.addValue(@tagName(header_config[0]), ?u1, header_check.haveHeader(step));
+                for (self.header_configs, self.header_checks) |config, check| {
+                    self.config_header.addValue(config.name, ?u1, check.haveHeader(step));
                 }
-                inline for (exe_configs, self.exe_checks) |exe_config, header_check| {
-                    self.config_header.addValue(@tagName(exe_config[0]), ?u1, try header_check.compiled(step, .{}));
+                for (self.exe_configs, self.exe_checks) |config, check| {
+                    self.config_header.addValue(config.name, ?u1, try check.compiled(step, .{}));
                 }
             }
         }.make;
@@ -1260,18 +1442,21 @@ fn addPyconfig(
                 .owner = b,
                 .makeFn = &add_values_make,
             }),
+            .version = version,
             .config_header = config_header,
-            .header_checks = undefined,
-            .exe_checks = undefined,
+            .header_configs = header_configs,
+            .header_checks = b.allocator.alloc(*CompileCheck, header_configs.len) catch @panic("OOM"),
+            .exe_configs = exe_configs,
+            .exe_checks = b.allocator.alloc(*CompileCheck, exe_configs.len) catch @panic("OOM"),
         };
-        inline for (header_configs, &add_values.header_checks) |header_config, *check| {
-            check.* = CompileCheck.create(b, target, .{ .header = header_config[1] });
+        for (header_configs, add_values.header_checks) |config, *check| {
+            check.* = CompileCheck.create(b, target, .{ .header = config.string });
             if (libs.zlib) |zlib| check.*.linkLibrary(zlib);
             if (libs.openssl) |openssl| check.*.linkLibrary(openssl);
             add_values.step.dependOn(&check.*.step);
         }
-        inline for (exe_configs, &add_values.exe_checks) |exe_config, *check| {
-            check.* = CompileCheck.create(b, target, .{ .exe = exe_config[1] });
+        for (exe_configs, add_values.exe_checks) |config, *check| {
+            check.* = CompileCheck.create(b, target, .{ .exe = config.string });
             if (libs.zlib) |zlib| check.*.linkLibrary(zlib);
             if (libs.openssl) |openssl| check.*.linkLibrary(openssl);
             add_values.step.dependOn(&check.*.step);
@@ -1280,6 +1465,7 @@ fn addPyconfig(
     }
 
     return .{
+        .version = version,
         .libs = libs,
         .header = .{ .config_header = config_header },
     };
@@ -1289,116 +1475,144 @@ fn have(x: bool) ?u1 {
     return if (x) 1 else null;
 }
 
-const python_src = [_][]const u8{
-    "Python/_warnings.c",
-    "Python/Python-ast.c",
-    "Python/Python-tokenize.c",
-    "Python/asdl.c",
-    "Python/ast.c",
-    "Python/ast_opt.c",
-    "Python/ast_unparse.c",
-    "Python/bltinmodule.c",
-    "Python/ceval.c",
-    "Python/codecs.c",
-    "Python/compile.c",
-    "Python/context.c",
-    "Python/dynamic_annotations.c",
-    "Python/errors.c",
-    "Python/frame.c",
-    "Python/frozenmain.c",
-    "Python/future.c",
-    "Python/getargs.c",
-    "Python/getcompiler.c",
-    "Python/getcopyright.c",
-    "Python/getplatform.c",
-    "Python/getversion.c",
-    "Python/hamt.c",
-    "Python/hashtable.c",
-    "Python/import.c",
-    "Python/importdl.c",
-    "Python/initconfig.c",
-    "Python/marshal.c",
-    "Python/modsupport.c",
-    "Python/mysnprintf.c",
-    "Python/mystrtoul.c",
-    "Python/pathconfig.c",
-    "Python/preconfig.c",
-    "Python/pyarena.c",
-    "Python/pyctype.c",
-    "Python/pyfpe.c",
-    "Python/pyhash.c",
-    "Python/pylifecycle.c",
-    "Python/pymath.c",
-    "Python/pystate.c",
-    "Python/pythonrun.c",
-    "Python/pytime.c",
-    "Python/bootstrap_hash.c",
-    "Python/specialize.c",
-    "Python/structmember.c",
-    "Python/symtable.c",
-    "Python/sysmodule.c",
-    "Python/thread.c",
-    "Python/traceback.c",
-    "Python/getopt.c",
-    "Python/pystrcmp.c",
-    "Python/pystrtod.c",
-    "Python/pystrhex.c",
-    "Python/dtoa.c",
-    "Python/formatter_unicode.c",
-    "Python/fileutils.c",
-    "Python/suggestions.c",
-    // Python/$(DYNLOADFILE) \
-    // $(LIBOBJS) \
-    // $(MACHDEP_OBJS) \
-    // $(DTRACE_OBJS) \
-    // @PLATFORM_OBJS@
+const Config = struct { name: []const u8, string: []const u8 };
+fn concatConfigs(comptime first: anytype, comptime second: anytype) [std.meta.fields(@TypeOf(first)).len + std.meta.fields(@TypeOf(second)).len]Config {
+    const first_len = std.meta.fields(@TypeOf(first)).len;
+    var result: [first_len + std.meta.fields(@TypeOf(second)).len]Config = undefined;
+    inline for (std.meta.fields(@TypeOf(first)), result[0..first_len]) |field, *config| {
+        config.* = .{ .name = @tagName(@field(first, field.name)[0]), .string = @field(first, field.name)[1] };
+    }
+    inline for (std.meta.fields(@TypeOf(second)), result[first_len..]) |field, *config| {
+        config.* = .{ .name = @tagName(@field(second, field.name)[0]), .string = @field(second, field.name)[1] };
+    }
+    return result;
+}
+
+const python_src = struct {
+    const common = [_][]const u8{
+        "Python/_warnings.c",
+        "Python/Python-ast.c",
+        "Python/Python-tokenize.c",
+        "Python/asdl.c",
+        "Python/ast.c",
+        "Python/ast_opt.c",
+        "Python/ast_unparse.c",
+        "Python/bltinmodule.c",
+        "Python/ceval.c",
+        "Python/codecs.c",
+        "Python/compile.c",
+        "Python/context.c",
+        "Python/dynamic_annotations.c",
+        "Python/errors.c",
+        "Python/frame.c",
+        "Python/frozenmain.c",
+        "Python/future.c",
+        "Python/getargs.c",
+        "Python/getcompiler.c",
+        "Python/getcopyright.c",
+        "Python/getplatform.c",
+        "Python/getversion.c",
+        "Python/hamt.c",
+        "Python/hashtable.c",
+        "Python/import.c",
+        "Python/importdl.c",
+        "Python/initconfig.c",
+        "Python/marshal.c",
+        "Python/modsupport.c",
+        "Python/mysnprintf.c",
+        "Python/mystrtoul.c",
+        "Python/pathconfig.c",
+        "Python/preconfig.c",
+        "Python/pyarena.c",
+        "Python/pyctype.c",
+        "Python/pyfpe.c",
+        "Python/pyhash.c",
+        "Python/pylifecycle.c",
+        "Python/pymath.c",
+        "Python/pystate.c",
+        "Python/pythonrun.c",
+        "Python/pytime.c",
+        "Python/bootstrap_hash.c",
+        "Python/specialize.c",
+        "Python/structmember.c",
+        "Python/symtable.c",
+        "Python/sysmodule.c",
+        "Python/thread.c",
+        "Python/traceback.c",
+        "Python/getopt.c",
+        "Python/pystrcmp.c",
+        "Python/pystrtod.c",
+        "Python/pystrhex.c",
+        "Python/dtoa.c",
+        "Python/formatter_unicode.c",
+        "Python/fileutils.c",
+        "Python/suggestions.c",
+    };
+    pub const @"3.11.4" = common;
+    pub const @"3.12.11" = common ++ .{
+        "Python/assemble.c",
+        "Python/flowgraph.c",
+        "Python/ceval_gil.c",
+        "Python/instrumentation.c",
+        "Python/intrinsics.c",
+        "Python/legacy_tracing.c",
+        "Python/tracemalloc.c",
+        "Python/perf_trampoline.c",
+    };
 };
 
-const object_src = [_][]const u8{
-    "Objects/abstract.c",
-    "Objects/accu.c",
-    "Objects/boolobject.c",
-    "Objects/bytes_methods.c",
-    "Objects/bytearrayobject.c",
-    "Objects/bytesobject.c",
-    "Objects/call.c",
-    "Objects/capsule.c",
-    "Objects/cellobject.c",
-    "Objects/classobject.c",
-    "Objects/codeobject.c",
-    "Objects/complexobject.c",
-    "Objects/descrobject.c",
-    "Objects/enumobject.c",
-    "Objects/exceptions.c",
-    "Objects/genericaliasobject.c",
-    "Objects/genobject.c",
-    "Objects/fileobject.c",
-    "Objects/floatobject.c",
-    "Objects/frameobject.c",
-    "Objects/funcobject.c",
-    "Objects/interpreteridobject.c",
-    "Objects/iterobject.c",
-    "Objects/listobject.c",
-    "Objects/longobject.c",
-    "Objects/dictobject.c",
-    "Objects/odictobject.c",
-    "Objects/memoryobject.c",
-    "Objects/methodobject.c",
-    "Objects/moduleobject.c",
-    "Objects/namespaceobject.c",
-    "Objects/object.c",
-    "Objects/obmalloc.c",
-    "Objects/picklebufobject.c",
-    "Objects/rangeobject.c",
-    "Objects/setobject.c",
-    "Objects/sliceobject.c",
-    "Objects/structseq.c",
-    "Objects/tupleobject.c",
-    "Objects/typeobject.c",
-    "Objects/unicodeobject.c",
-    "Objects/unicodectype.c",
-    "Objects/unionobject.c",
-    "Objects/weakrefobject.c",
+const object_src = struct {
+    const common = [_][]const u8{
+        "Objects/abstract.c",
+        "Objects/boolobject.c",
+        "Objects/bytes_methods.c",
+        "Objects/bytearrayobject.c",
+        "Objects/bytesobject.c",
+        "Objects/call.c",
+        "Objects/capsule.c",
+        "Objects/cellobject.c",
+        "Objects/classobject.c",
+        "Objects/codeobject.c",
+        "Objects/complexobject.c",
+        "Objects/descrobject.c",
+        "Objects/enumobject.c",
+        "Objects/exceptions.c",
+        "Objects/genericaliasobject.c",
+        "Objects/genobject.c",
+        "Objects/fileobject.c",
+        "Objects/floatobject.c",
+        "Objects/frameobject.c",
+        "Objects/funcobject.c",
+        "Objects/interpreteridobject.c",
+        "Objects/iterobject.c",
+        "Objects/listobject.c",
+        "Objects/longobject.c",
+        "Objects/dictobject.c",
+        "Objects/odictobject.c",
+        "Objects/memoryobject.c",
+        "Objects/methodobject.c",
+        "Objects/moduleobject.c",
+        "Objects/namespaceobject.c",
+        "Objects/object.c",
+        "Objects/obmalloc.c",
+        "Objects/picklebufobject.c",
+        "Objects/rangeobject.c",
+        "Objects/setobject.c",
+        "Objects/sliceobject.c",
+        "Objects/structseq.c",
+        "Objects/tupleobject.c",
+        "Objects/typeobject.c",
+        "Objects/unicodeobject.c",
+        "Objects/unicodectype.c",
+        "Objects/unionobject.c",
+        "Objects/weakrefobject.c",
+    };
+    pub const @"3.11.4" = common ++ .{
+        "Objects/accu.c",
+    };
+    pub const @"3.12.11" = common ++ .{
+        "Objects/typevarobject.c",
+    };
 };
 
 const parser_src = [_][]const u8{
@@ -1421,6 +1635,11 @@ const parser_src = [_][]const u8{
 const module_src = [_][]const u8{
     "Modules/main.c",
     "Modules/gcmodule.c",
+};
+
+const library_src_omit_frozen = struct {
+    pub const @"3.11.4" = parser_src ++ object_src.@"3.11.4" ++ python_src.@"3.11.4" ++ module_src;
+    pub const @"3.12.11" = parser_src ++ object_src.@"3.12.11" ++ python_src.@"3.12.11" ++ module_src;
 };
 
 const frozen_modules = [_][]const u8{
@@ -1449,37 +1668,51 @@ const frozen_modules = [_][]const u8{
     "Tools/freeze/flag.py",
 };
 
-const frozen_module_names: [frozen_modules.len][]const u8 = blk_names: {
-    var names: [frozen_modules.len][]const u8 = undefined;
-    for (&names, frozen_modules) |*name_ref, path| {
-        if (std.mem.eql(u8, "Tools/freeze/flag.py", path)) {
-            name_ref.* = "frozen_only";
-            continue;
-        }
-
-        const name = blk_name: {
-            const path_prefix = "Lib/";
-            const path_suffix = blk: {
-                const init_suffix = "/__init__.py";
-                if (std.mem.endsWith(u8, path, init_suffix)) break :blk init_suffix;
-                break :blk ".py";
-            };
-            var name_buf: [path.len - path_prefix.len - path_suffix.len]u8 = undefined;
-            for (&name_buf, path[path_prefix.len..][0..name_buf.len]) |*name_char, path_char| {
-                name_char.* = switch (path_char) {
-                    '/' => '_',
-                    else => |c| c,
-                };
+fn frozenModuleNames(version: Version) *const [frozen_modules.len][]const u8 {
+    return switch (version) {
+        .@"3.11.4" => &frozen_module_name_sets.@"3.11",
+        else => &frozen_module_name_sets.@"after_3.11",
+    };
+}
+const frozen_module_name_sets = struct {
+    pub const @"3.11" = makeNames(.@"3.11");
+    pub const @"after_3.11" = makeNames(.@"after_3.11");
+    fn makeNames(when: enum { @"3.11", @"after_3.11" }) [frozen_modules.len][]const u8 {
+        var names: [frozen_modules.len][]const u8 = undefined;
+        for (&names, frozen_modules) |*name_ref, path| {
+            if (std.mem.eql(u8, "Tools/freeze/flag.py", path)) {
+                name_ref.* = "frozen_only";
+                continue;
             }
-            break :blk_name name_buf;
-        };
-        name_ref.* = &name;
+
+            const name = blk_name: {
+                const path_prefix = "Lib/";
+                const path_suffix = blk: {
+                    const init_suffix = "/__init__.py";
+                    if (std.mem.endsWith(u8, path, init_suffix)) break :blk init_suffix;
+                    break :blk ".py";
+                };
+                var name_buf: [path.len - path_prefix.len - path_suffix.len]u8 = undefined;
+                for (&name_buf, path[path_prefix.len..][0..name_buf.len]) |*name_char, path_char| {
+                    name_char.* = switch (path_char) {
+                        '/' => switch (when) {
+                            .@"3.11" => '_',
+                            .@"after_3.11" => '.',
+                        },
+                        else => |c| c,
+                    };
+                }
+                break :blk_name name_buf;
+            };
+            name_ref.* = &name;
+        }
+        return names;
     }
-    break :blk_names names;
 };
 
 fn ci(
     b: *std.Build,
+    version: Version,
     ssl_enabled: bool,
     upstream: *std.Build.Dependency,
     ci_step: *std.Build.Step,
@@ -1487,6 +1720,7 @@ fn ci(
         replace_exe: *std.Build.Step.Compile,
         makesetup_exe: *std.Build.Step.Compile,
         stage2_frozen_mods: Stage2FrozenMods,
+        frozen_headers: []const std.Build.LazyPath,
         deepfreeze_c: std.Build.LazyPath,
     },
 ) !void {
@@ -1530,7 +1764,7 @@ fn ci(
                 .optimize = optimize,
             })) |dep| dep.artifact("openssl") else null) else null,
         };
-        const makesetup = addMakesetup(b, upstream, libs, .{
+        const makesetup = addMakesetup(b, version, upstream, libs, .{
             .os_tag = target.result.os.tag,
             .replace_exe = args.replace_exe,
             .makesetup_exe = args.makesetup_exe,
@@ -1538,19 +1772,35 @@ fn ci(
         const exe = addPythonExe(b, upstream, target, optimize, .{
             .name = "python",
             .makesetup_out = makesetup,
-            .pyconfig = try addPyconfig(b, upstream, target, libs),
-            .stage = .{
-                .final = .{
-                    .stage2 = args.stage2_frozen_mods,
-                    .deepfreeze_c = args.deepfreeze_c,
-                },
-            },
+            .pyconfig = try addPyconfig(b, version, upstream, target, libs),
+            .stage = .{ .final = .{
+                .stage2 = args.stage2_frozen_mods,
+                .frozen_headers = args.frozen_headers,
+                .deepfreeze_c = args.deepfreeze_c,
+            } },
         });
 
         install.dependOn(
             &b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = target_dest_dir } }).step,
         );
     }
+}
+
+fn concat(allocator: std.mem.Allocator, lists: []const []const []const u8) []const []const u8 {
+    var total: usize = 0;
+    for (lists) |list| {
+        total += list.len;
+    }
+    const result = allocator.alloc([]const u8, total) catch @panic("OOM");
+    var index: usize = 0;
+    for (lists) |list| {
+        for (list) |s| {
+            result[index] = s;
+            index += 1;
+        }
+    }
+    std.debug.assert(index == total);
+    return result;
 }
 
 const std = @import("std");

@@ -4,9 +4,15 @@
     .version = "0.0.0",
     .minimum_zig_version = "0.14.1",
     .dependencies = .{
-        .upstream = .{
+        .@"upstream_3.11.4" = .{
             .url = "git+https://github.com/python/cpython#d2340ef25721b6a72d45d4508c672c4be38c67d3",
             .hash = "N-V-__8AABDkxQWDw9b21RiSHxBb2ErJ78saCf1XL88YMoT7",
+            .lazy = true,
+        },
+        .@"upstream_3.12.11" = .{
+            .url = "git+https://github.com/python/cpython#55fee9cf216abe4ec0d1139f94b1930fbd0c7644",
+            .hash = "N-V-__8AAPXFFgaXQejAFSUHUzijh3iPdy1ps-UZiLaGwczp",
+            .lazy = true,
         },
         .zlib = .{
             .url = "https://github.com/allyourcodebase/zlib/archive/6c72830882690c1eb2567a537525c3f432c1da50.tar.gz",

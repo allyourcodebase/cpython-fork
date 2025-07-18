@@ -61,7 +61,7 @@ pub fn main() !void {
     }
 
     {
-        var out_file = try out_dir.createFile("sources.txt", .{});
+        var out_file = try out_dir.createFile("module-compile-args.txt", .{});
         defer out_file.close();
         var bw = std.io.bufferedWriter(out_file.writer());
         const writer = bw.writer();
@@ -74,21 +74,26 @@ pub fn main() !void {
                 try writer.print("# Module '{s}'{s}\n", .{ module_name, suffix });
             }
             const prefix: []const u8 = if (entry.value_ptr.enabled) "" else "# ";
-            for (entry.value_ptr.src_files) |src_file| {
-                try writer.print("{s}Modules/{s}\n", .{ prefix, src_file });
-            }
+            for (entry.value_ptr.compile_args) |compile_arg| switch (compile_arg) {
+                .source => |src| try writer.print("{s}Modules/{s}\n", .{ prefix, src }),
+                .include => |inc| try writer.print("{s}-I{s}\n", .{ prefix, inc }),
+            };
         }
         try bw.flush();
     }
 }
+
+const CompileArg = union(enum) {
+    source: []const u8,
+    include: []const u8,
+};
 
 const Kind = enum { static, shared };
 const Module = struct {
     kind: ?Kind,
     enabled: bool,
     defines: []const []const u8,
-    src_files: []const []const u8,
-    include_paths: []const []const u8,
+    compile_args: []const CompileArg,
     libs: []const []const u8,
 };
 const Setup = struct {
@@ -165,8 +170,8 @@ fn parseSetupFile(
             }
 
             var defines: std.ArrayListUnmanaged([]const u8) = .{};
-            var src_files: std.ArrayListUnmanaged([]const u8) = .{};
-            var include_paths: std.ArrayListUnmanaged([]const u8) = .{};
+            var compile_args: std.ArrayListUnmanaged(CompileArg) = .{};
+            var libraries: std.ArrayListUnmanaged([]const u8) = .{};
             var libs: std.ArrayListUnmanaged([]const u8) = .{};
             while (parts.next()) |part| {
                 if (std.mem.startsWith(u8, part, "$")) {
@@ -177,13 +182,15 @@ fn parseSetupFile(
                 if (std.mem.startsWith(u8, part, "#")) {
                     break;
                 } else if (std.mem.endsWith(u8, part, ".c")) {
-                    src_files.append(allocator, part) catch |e| oom(e);
+                    compile_args.append(allocator, .{ .source = part }) catch |e| oom(e);
+                } else if (std.mem.endsWith(u8, part, ".a")) {
+                    libraries.append(allocator, part) catch |e| oom(e);
                 } else if (std.mem.startsWith(u8, part, "-D")) {
                     if (part.len == 2) errExit("{s}:{}: expected '-DDEFINE' but just got '-D'", .{ file_path, lineno });
                     defines.append(allocator, part[2..]) catch |e| oom(e);
                 } else if (std.mem.startsWith(u8, part, "-I")) {
                     if (part.len == 2) errExit("{s}:{}: expected '-IPATH' but just got '-I'", .{ file_path, lineno });
-                    include_paths.append(allocator, part[2..]) catch |e| oom(e);
+                    compile_args.append(allocator, .{ .include = part[2..] }) catch |e| oom(e);
                 } else if (std.mem.startsWith(u8, part, "-l")) {
                     if (part.len == 2) errExit("{s}:{}: expected '-lLIB' but just got '-l'", .{ file_path, lineno });
                     libs.append(allocator, part[2..]) catch |e| oom(e);
@@ -206,13 +213,66 @@ fn parseSetupFile(
                 .kind = kind,
                 .enabled = block_enabled,
                 .defines = defines.toOwnedSlice(allocator) catch |e| oom(e),
-                .src_files = src_files.toOwnedSlice(allocator) catch |e| oom(e),
-                .include_paths = include_paths.toOwnedSlice(allocator) catch |e| oom(e),
+                .compile_args = compile_args.toOwnedSlice(allocator) catch |e| oom(e),
                 .libs = libs.toOwnedSlice(allocator) catch |e| oom(e),
             };
         }
     }
 }
+
+// const ExprIt = struct {
+//     s: []const u8,
+//     offset: usize = 0,
+
+//     pub const Entry = union(enum) {
+//         string: []const u8,
+//         expr: []const u8,
+//     };
+//     pub fn next(self: *ExprIt) ?Entry {
+//         if (self.offset == self.s.len) return null;
+//         const old_offset = self.offset;
+//         self.offset = std.mem.indexOfScalarPos(u8, self.s, self.offset, '$') orelse {
+//             self.offset = self.s.len;
+//             return .{ .string = self.s[old_offset..] };
+//         };
+//         if (self.offset > old_offset) return .{ .string = self.s[old_offset..self.offset] };
+//         self.offset += 1;
+//         // string ends with '$'
+//         if (self.offset == self.s.len) return .{ .string = self.s[old_offset..] };
+//         if (self.s[self.offset] != '(') std.debug.panic("todo: handle '$' not followed by '(': '{s}'", .{self.s});
+//         self.offset += 1;
+//         const end = std.mem.indexOfScalarPos(u8, self.s, self.offset, ')') orelse std.debug.panic("unterminated $(: '{s}'", .{self.s});
+//         const expr_start = self.offset;
+//         self.offset = end + 1;
+//         return .{ .expr = self.s[expr_start..end] };
+//     }
+// };
+
+// fn fmtResolve(s: []const u8, arg: struct { srcdir: []const u8 }) FmtResolve {
+//     return .{ .s = s, .srcdir = arg.srcdir };
+// }
+// const FmtResolve = struct {
+//     s: []const u8,
+//     srcdir: []const u8,
+//     pub fn format(
+//         self: @This(),
+//         comptime fmt: []const u8,
+//         options: std.fmt.FormatOptions,
+//         writer: anytype,
+//     ) !void {
+//         _ = fmt;
+//         _ = options;
+//         var it: ExprIt = .{ .s = self.s };
+//         while (it.next()) |entry| switch (entry) {
+//             .string => |s| try writer.writeAll(s),
+//             .expr => |e| {
+//                 if (std.mem.eql(u8, e, "srcdir")) {
+//                     try writer.writeAll(self.srcdir);
+//                 } else std.debug.panic("todo: resolve expression '{s}'", .{e});
+//             },
+//         };
+//     }
+// };
 
 fn oom(e: error{OutOfMemory}) noreturn {
     errExit("{s}", .{@errorName(e)});
