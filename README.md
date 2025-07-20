@@ -1,3 +1,7 @@
+# Deprecrated
+
+This repo has been deprecated in favor of https://github.com/allyourcodebase/cpython
+
 # CPython Zig Package
 
 This is a fork of [CPython](https://www.python.org/), packaged for Zig.
